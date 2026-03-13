@@ -1,0 +1,5 @@
+venv/
+.env
+smime/
+__pycache__/
+db.json
