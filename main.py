@@ -9,6 +9,8 @@ from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 from email.generator import BytesGenerator
 from io import BytesIO
+from dataclasses import dataclass
+from typing import Optional
 import requests
 import logging
 import colorlog
@@ -20,13 +22,73 @@ import warnings
 import traceback
 import tempfile
 import subprocess
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from notion_client import Client
+
 try:
     from systemd import journal
 except ModuleNotFoundError:
     pass
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from dotenv import load_dotenv
 from requests.exceptions import SSLError
+
+@dataclass
+class Assignment:
+    id: int
+    activity_assign_id: int
+    activity_uuid: str
+    assign_name: str
+    object_name: str
+    status_desc: str
+    student_status_desc: str
+    student_status_desc_pending: str
+    dt_publish_start: str
+    dt_publish_finish: str
+    dt_publish_finish_display: str
+    due_date_desc: str
+    dt_draft: Optional[str]
+    dt_draft_display: Optional[str]
+    draft_file_last_submit_date: Optional[str]
+    draft_overdue_flg: str
+    final_file_last_submit_date: Optional[str]
+    extension_flg: str
+    homework_flg: str
+    isexempt_flg: str
+    due_today_flg: str
+    overdue_flg: str
+
+    @staticmethod
+    def from_json(data: dict) -> "Assignment":
+        # map JSON keys to dataclass fields
+        return Assignment(
+            id=data["id"],
+            activity_assign_id=data["ACTIVITY_ASSIGN_ID"],
+            activity_uuid=data["ACTIVITY_UUID"],
+            assign_name=data["ASSIGN_NAME"],
+            object_name=data["object_name"],
+            status_desc=data["STATUS_DESC"],
+            student_status_desc=data["STUDENT_STATUS_DESC"],
+            student_status_desc_pending=data["STUDENT_STATUS_DESC_PENDING"],
+            dt_publish_start=data["DT_PUBLISH_START"],
+            dt_publish_finish=data["DT_PUBLISH_FINISH"],
+            dt_publish_finish_display=data["DT_PUBLISH_FINISH_DISPLAY"],
+            due_date_desc=data["DUE_DATE_DESC"],
+            dt_draft=data.get("DT_DRAFT"),
+            dt_draft_display=data.get("DT_DRAFT_DISPLAY"),
+            draft_file_last_submit_date=data.get("DRAFT_FILE_LAST_SUBMIT_DATE"),
+            draft_overdue_flg=data["DRAFT_OVERDUE_FLG"],
+            final_file_last_submit_date=data.get("FINAL_FILE_LAST_SUBMIT_DATE"),
+            extension_flg=data["extension_flg"],
+            homework_flg=data["homework_flg"],
+            isexempt_flg=data["isexempt_flg"],
+            due_today_flg=data["DUE_TODAY_FLG"],
+            overdue_flg=data["OVERDUE_FLG"]
+        )
 
 # Custom SMTP class to log debug messages
 class LoggingSMTP(smtplib.SMTP):
@@ -121,20 +183,51 @@ load_dotenv()
 INTEGRATION_SECRET = os.getenv('INTEGRATION_SECRET')
 
 if not INTEGRATION_SECRET:
-    logger.error('INTEGRATION_SECRET environment variable not set.')
+    logger.critical('INTEGRATION_SECRET environment variable not set.') # TODO: Update this to not fail on missing creds
+    exit(1)
 
 # Load default API parameters
 Base_URL = 'https://api.notion.com/v1'
 headers = {'Authorization': f'Bearer {INTEGRATION_SECRET}','Notion-Version': '2022-06-28','Content-Type': 'application/json'}
+notion = Client(auth=INTEGRATION_SECRET)
+db_id = os.getenv("DB_ID") # DEPRECATED - Use DS_ID instead
+ds_id = os.getenv("DS_ID")
 
 # Functions
-def refresh_database():
+
+def tass_to_iso(tass_date):
+    if not tass_date:
+        return None
+    try:
+        # Format: "2026-05-22 09:00:00.0"
+        return datetime.strptime(tass_date, "%Y-%m-%d %H:%M:%S.%f").isoformat()
+    except ValueError:
+        try:
+            # Format: "22/05/2026 at 9:00am"
+            return datetime.strptime(tass_date, "%d/%m/%Y at %I:%M%p").isoformat()
+        except ValueError:
+            print(f"Unknown TASS date format: {tass_date}")
+            return None
+
+def refresh_database(): # TODO: Update this to use the new Notion Client
     global db
+    filter_body = {
+        "filter": {
+            "property": "Archived",
+            "checkbox": {
+                "equals": False
+            }
+        }
+    }
     try:
         logger.info("Refreshing database")
+        if not db_id:
+            logger.error("DB_ID environment variable not set.")
+            raise ValueError("DB_ID environment variable not set.")
         r = requests.post(
-            f'{Base_URL}/databases/1308dcf755cc8018be80dfeb8276b410/query',
+            f'{Base_URL}/databases/{db_id}/query',
             headers=headers,
+            json=filter_body,
             verify=True
         )
         if not r.ok:
@@ -145,8 +238,9 @@ def refresh_database():
     except SSLError:
         try:
             r = requests.post(
-                f'{Base_URL}/databases/1308dcf755cc8018be80dfeb8276b410/query',
+                f'{Base_URL}/databases/{db_id}/query',
                 headers=headers,
+                json=filter_body,
                 verify=False
             )
             if not r.ok:
@@ -195,12 +289,12 @@ def reminders():
                         (draft := page["properties"].get("Draft Date", {}).get("date", {}))
                         and draft.get("start") == today
                         and page["properties"].get("Status", {}).get("status", {}).get("name",
-                                                                                       "").lower() == "not submitted"
+                                                                                       "").lower() == "not submitted (draft)"
                 ) or (
                         (due := page["properties"].get("Due Date", {}).get("date", {}))
                         and due.get("start") == today
                         and page["properties"].get("Status", {}).get("status", {}).get("name", "").lower() in [
-                            "not submitted", "draft submitted"]
+                            "not submitted (draft)", "not submitted (final)"]
                 )
         )
     ]
@@ -222,12 +316,12 @@ def reminders():
             (
                 (draft := page["properties"].get("Draft Date", {}).get("date", {}))
                 and day_1 <= draft.get("start", "") <= day_2
-                and page["properties"].get("Status", {}).get("status", {}).get("name", "").lower() == "not submitted"
+                and page["properties"].get("Status", {}).get("status", {}).get("name", "").lower() == "not submitted (draft)"
             ) or (
                 (due := page["properties"].get("Due Date", {}).get("date", {}))
                 and day_1 <= due.get("start", "") <= day_2
                 and page["properties"].get("Status", {}).get("status", {}).get("name", "").lower() in [
-                    "not submitted", "draft submitted"]
+                    "not submitted (draft)", "not submitted (final)"]
             )
         )
     ]
@@ -249,12 +343,12 @@ def weekly_summary():
             (
                 (draft := page["properties"].get("Draft Date", {}).get("date", {}))
                 and today.isoformat() <= draft.get("start", "") <= week_later.isoformat()
-                and page["properties"].get("Status", {}).get("status", {}).get("name", "").lower() == "not submitted"
+                and page["properties"].get("Status", {}).get("status", {}).get("name", "").lower() == "not submitted (final)"
             ) or (
                 (due := page["properties"].get("Due Date", {}).get("date", {}))
                 and today.isoformat() <= due.get("start", "") <= week_later.isoformat()
                 and page["properties"].get("Status", {}).get("status", {}).get("name", "").lower() in [
-                    "not submitted", "draft submitted"]
+                    "not submitted (draft)", "not submitted (final)"]
             )
         )
     ]
@@ -272,6 +366,113 @@ def weekly_summary():
     ]
 
     notify(assignments, exams, [], "weekly")
+
+def load_assignments():
+    TASS_USER = os.getenv("TASS_USER")
+    TASS_PASS = os.getenv("TASS_PASS")
+    if not TASS_USER or not TASS_PASS:
+        logger.error("TASS_USER and TASS_PASS environment variables must be set to load assignments from Student Cafe")
+        return
+    # Scrapes assignments from Student Cafe and adds them to the remote db
+    try:
+        driver = webdriver.Chrome()
+        driver.get("https://alpha.tas.qld.edu.au/studentcafe/login.cfm")
+        logger.debug("Navigated to login page")
+        email_input = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "i0116"))
+        )
+        logger.debug("Email element found")
+        email_input.send_keys(TASS_USER)
+        WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, "//input[@type='submit' and @value='Next']"))
+        ).click()
+        logger.debug("Submitted email")
+        password_input = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "i0118"))
+        )
+        logger.debug("Password element found")
+        password_input.send_keys(TASS_PASS)
+        WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, "//input[@type='submit' and @value='Sign in']"))
+        ).click()
+        logger.debug("Submitted password")
+        WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, "//input[@type='button' and @value='No']"))
+        ).click()
+        logger.debug("Clicked 'No' on stay signed in prompt")
+
+        result = driver.execute_async_script("""
+const callback = arguments[0];
+
+fetch("https://alpha.tas.qld.edu.au/studentcafe/remote-json.cfm?do=studentportal.activities.main.lmsactivities.grid", {
+    credentials: "include",
+    headers: {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest"
+    },
+    body: "lmsclass=&assignmentstatus=&assign_year=2026&topicsubscribe=activity.details,activity.onlinetest",
+    method: "POST"
+})
+.then(r => r.json())
+.then(data => callback(data))
+.catch(err => callback({"error": err.toString()}));
+""")
+        logger.info("Received response from Student Cafe")
+        logger.debug(f"Response: {result}")
+        driver.close()
+        update_remote(result.get("data", []))
+        if "error" in result:
+            raise Exception(f"Error fetching assignments: {result['error']}")
+    except Exception as e:
+        logger.error("Error while loading assignments from Student Cafe")
+        logger.debug(e)
+        return
+
+def update_remote(assignments_list):
+    logger.debug("Run update remote")
+    logger.debug(f"Received assignments_list: {assignments_list}")
+    for assignment_data in assignments_list:
+        logger.debug("running for loop")
+        assignment_obj = Assignment.from_json(assignment_data)
+        upsert_assignment(assignment_obj)
+
+def upsert_assignment(assignment):
+    logger.debug(f"Upserting assignment {assignment.object_name} with Activity Assign ID {assignment.activity_assign_id}")
+    if not ds_id:
+        logger.error("DS_ID environment variable not set.")
+        raise ValueError("DS_ID environment variable not set.")
+    # Step 1: Search for existing page with Activity Assign ID
+    query = notion.data_sources.query(
+        **{
+            "data_source_id": ds_id,
+            "filter": {
+                "property": "Activity Assign ID",
+                "number": {"equals": assignment.activity_assign_id}
+            }
+        }
+    )
+    
+    properties_payload = {
+        "Task Name": {"title": [{"text": {"content": assignment.object_name}}]},
+        "Activity Assign ID": {"number": assignment.activity_assign_id},
+        "Draft Date": {"date": {"start": tass_to_iso(assignment.dt_draft)} if assignment.dt_draft else None},
+        "Due Date": {"date": {"start": tass_to_iso(assignment.dt_publish_finish)} if assignment.dt_publish_finish else None},
+        "Task Type": {"select": {"name": "Exam" if "exam" in assignment.object_name.lower() or "folio" in assignment.object_name.lower() else "Practical" if "practical" in assignment.object_name.lower() else "Assignment"}},
+        "Status": {"status": {"name": assignment.student_status_desc}},
+        "Results Release": {"date": {"start": tass_to_iso(assignment.dt_publish_finish_display)} if assignment.dt_publish_finish_display else None},
+        # TODO: If I want to get results per activity im going to have to scrape https://alpha.tas.qld.edu.au/studentcafe/remote-html.cfm?do=studentportal.activities.main.lmsActivities.detail which has assign id in the payload. Could also help with activity types idk 
+    }
+
+    # Step 2: Update or create
+    if query["results"]:
+        logger.debug(f"Found existing page with ID {query['results'][0]['id']} for Activity Assign ID {assignment.activity_assign_id}, updating it")
+        page_id = query["results"][0]["id"]
+        notion.pages.update(page_id=page_id, properties=properties_payload)
+        print(f"Updated page {page_id} for Activity Assign ID {assignment.activity_assign_id}")
+    else:
+        logger.debug(f"No existing page found for Activity Assign ID {assignment.activity_assign_id}, creating new page")
+        notion.pages.create(parent={"data_source_id": ds_id}, properties=properties_payload)
+        print(f"Created new page for Activity Assign ID {assignment.activity_assign_id}")
 
 def load_db():
     global db
@@ -475,7 +676,7 @@ def email(html,terminology):
                     outer = EmailMessage()
                     outer["Subject"] = f"Tasks Due {terminology}"
                     outer["From"] = f"Task Reminders <{username}>"
-                    outer["To"] = "lb29696@tas.qld.edu.au"
+                    outer["To"] = os.getenv("RECIPIENT")
                     outer.set_type("multipart/signed")
                     outer.set_param("protocol", "application/x-pkcs7-signature")
                     outer.set_param("micalg", "sha-256")
@@ -504,7 +705,7 @@ def email(html,terminology):
                 msg = EmailMessage()
                 msg["Subject"] = f"Tasks Due {terminology}"
                 msg["From"] = f"Task Reminders <{username}>"
-                msg["To"] = "lb29696@tas.qld.edu.au"
+                msg["To"] = os.getenv("RECIPIENT")
                 msg.set_content(text)
                 msg.add_alternative(html, subtype="html")
                 smtp.send_message(msg)
@@ -515,16 +716,24 @@ def email(html,terminology):
         logger.debug(e)
 
 db = load_db()
-refresh_database()
 
 if devParam:
-    reminders()
-    logger.info("Sending reminders complete")
-    input("Press Enter to send weekly summary...")
-    weekly_summary()
-    logger.info("Sending weekly summary complete")
+    logger.info("Entering development mode")
+    if input("Press Enter to update remote db from Notion... (s to skip) (UNSTABLE)").lower() != "s":
+        load_assignments()
+        logger.info("Database update complete")
+    if input("Press Enter to refresh database... (s to skip)").lower() != "s":
+        refresh_database()
+        logger.info("Database refresh complete")
+    if input("Press Enter to send daily reminders... (s to skip)").lower() != "s":
+        reminders()
+        logger.info("Sending reminders complete")
+    if input("Press Enter to send weekly summary... (s to skip)").lower() != "s":
+        weekly_summary()
+        logger.info("Sending weekly summary complete")
     sys.exit(0)
 else:
+    refresh_database()
     schedule.every().hour.do(refresh_database)
     schedule.every().day.at("06:00", "Australia/Brisbane").do(reminders)
     schedule.every().week.do(weekly_summary)

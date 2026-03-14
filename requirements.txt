@@ -14,3 +14,5 @@ requests==2.32.3
 schedule==1.2.2
 systemd-python==235; platform_system == "Linux"
 urllib3==2.4.0
+selenium==4.14.0
+notion_client==3.0.0
