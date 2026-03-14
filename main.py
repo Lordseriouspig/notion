@@ -10,8 +10,7 @@ from email.mime.application import MIMEApplication
 from email.generator import BytesGenerator
 from io import BytesIO
 from dataclasses import dataclass
-from typing import Optional
-import requests
+from typing import Any, Optional, cast
 import logging
 import colorlog
 import argparse
@@ -27,7 +26,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from notion_client import Client
+from notion_client import APIResponseError, Client, collect_paginated_api
 
 try:
     from systemd import journal
@@ -35,7 +34,6 @@ except ModuleNotFoundError:
     pass
 from datetime import date, timedelta, datetime
 from dotenv import load_dotenv
-from requests.exceptions import SSLError
 
 @dataclass
 class Assignment:
@@ -187,10 +185,13 @@ if not INTEGRATION_SECRET:
     exit(1)
 
 # Load default API parameters
-Base_URL = 'https://api.notion.com/v1'
-headers = {'Authorization': f'Bearer {INTEGRATION_SECRET}','Notion-Version': '2022-06-28','Content-Type': 'application/json'}
-notion = Client(auth=INTEGRATION_SECRET)
-db_id = os.getenv("DB_ID") # DEPRECATED - Use DS_ID instead
+notion = Client(
+    auth=INTEGRATION_SECRET,
+    logger=logger,
+    log_level=logging.DEBUG if debugParam else logging.WARNING,
+    notion_version="2025-09-03",
+)
+db_id = os.getenv("DB_ID")
 ds_id = os.getenv("DS_ID")
 
 # Functions
@@ -209,9 +210,35 @@ def tass_to_iso(tass_date):
             print(f"Unknown TASS date format: {tass_date}")
             return None
 
-def refresh_database(): # TODO: Update this to use the new Notion Client
+def resolve_data_source_id():
+    global ds_id
+    if ds_id:
+        return ds_id
+
+    if not db_id:
+        logger.error("DS_ID environment variable not set, and DB_ID is unavailable for discovery.")
+        raise ValueError("DS_ID environment variable not set, and DB_ID is unavailable for discovery.")
+
+    logger.info("Resolving data source ID from database")
+    database = cast(dict[str, Any], notion.databases.retrieve(database_id=db_id))
+    data_sources = database.get("data_sources", [])
+
+    if not data_sources:
+        logger.error("No data sources found for the configured database.")
+        raise ValueError("No data sources found for the configured database.")
+
+    if len(data_sources) > 1:
+        logger.error("Multiple data sources found for the configured database. Set DS_ID to the specific data source to use.")
+        raise ValueError("Multiple data sources found for the configured database. Set DS_ID to the specific data source to use.")
+
+    ds_id = data_sources[0]["id"]
+    logger.info(f"Resolved data source ID {ds_id} from database")
+    return ds_id
+
+
+def refresh_database():
     global db
-    filter_body = {
+    notion_filter = {
         "filter": {
             "property": "Archived",
             "checkbox": {
@@ -221,44 +248,22 @@ def refresh_database(): # TODO: Update this to use the new Notion Client
     }
     try:
         logger.info("Refreshing database")
-        if not db_id:
-            logger.error("DB_ID environment variable not set.")
-            raise ValueError("DB_ID environment variable not set.")
-        r = requests.post(
-            f'{Base_URL}/databases/{db_id}/query',
-            headers=headers,
-            json=filter_body,
-            verify=True
+        data_source_id = resolve_data_source_id()
+        results = collect_paginated_api(
+            notion.data_sources.query,
+            data_source_id=data_source_id,
+            filter=notion_filter["filter"],
         )
-        if not r.ok:
-            logger.error("Error while receiving new datasets from notion")
-            logger.debug(f"{r.status_code}: {r.reason}")
-            logger.debug(f"{r.text}")
-
-    except SSLError:
-        try:
-            r = requests.post(
-                f'{Base_URL}/databases/{db_id}/query',
-                headers=headers,
-                json=filter_body,
-                verify=False
-            )
-            if not r.ok:
-                logger.error("Error while receiving new datasets from notion")
-                logger.debug(f"{r.status_code}: {r.reason}")
-                logger.debug(f"{r.text}")
-        except Exception as e:
-            logger.error("Error while updating datasets")
-            logger.debug(e)
-            db = None
-        else:
-            db = r.json()
+        db = {"results": results}
+    except APIResponseError as e:
+        logger.error("Error while updating datasets")
+        logger.debug(f"{e.code}: {e}")
+        logger.debug(e.body)
+        db = None
     except Exception as e:
         logger.error("Error while updating datasets")
         logger.debug(e)
         db = None
-    else:
-        db = r.json()
     finally:
         if not db:
             logger.info("Did not update database")
@@ -438,18 +443,19 @@ def update_remote(assignments_list):
 
 def upsert_assignment(assignment):
     logger.debug(f"Upserting assignment {assignment.object_name} with Activity Assign ID {assignment.activity_assign_id}")
-    if not ds_id:
-        logger.error("DS_ID environment variable not set.")
-        raise ValueError("DS_ID environment variable not set.")
+    data_source_id = resolve_data_source_id()
     # Step 1: Search for existing page with Activity Assign ID
-    query = notion.data_sources.query(
-        **{
-            "data_source_id": ds_id,
-            "filter": {
-                "property": "Activity Assign ID",
-                "number": {"equals": assignment.activity_assign_id}
+    query = cast(
+        dict[str, Any],
+        notion.data_sources.query(
+            **{
+                "data_source_id": data_source_id,
+                "filter": {
+                    "property": "Activity Assign ID",
+                    "number": {"equals": assignment.activity_assign_id}
+                }
             }
-        }
+        )
     )
     
     properties_payload = {
@@ -471,7 +477,7 @@ def upsert_assignment(assignment):
         print(f"Updated page {page_id} for Activity Assign ID {assignment.activity_assign_id}")
     else:
         logger.debug(f"No existing page found for Activity Assign ID {assignment.activity_assign_id}, creating new page")
-        notion.pages.create(parent={"data_source_id": ds_id}, properties=properties_payload)
+        notion.pages.create(parent={"data_source_id": data_source_id}, properties=properties_payload)
         print(f"Created new page for Activity Assign ID {assignment.activity_assign_id}")
 
 def load_db():
