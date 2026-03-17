@@ -11,6 +11,7 @@ from email.generator import BytesGenerator
 from io import BytesIO
 from dataclasses import dataclass
 from typing import Any, Optional, cast
+from zoneinfo import ZoneInfo
 import logging
 import colorlog
 import argparse
@@ -199,13 +200,14 @@ ds_id = os.getenv("DS_ID")
 def tass_to_iso(tass_date):
     if not tass_date:
         return None
+    tz = ZoneInfo("Australia/Brisbane")
     try:
         # Format: "2026-05-22 09:00:00.0"
-        return datetime.strptime(tass_date, "%Y-%m-%d %H:%M:%S.%f").isoformat()
+        return datetime.strptime(tass_date, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=tz).isoformat()
     except ValueError:
         try:
             # Format: "22/05/2026 at 9:00am"
-            return datetime.strptime(tass_date, "%d/%m/%Y at %I:%M%p").isoformat()
+            return datetime.strptime(tass_date, "%d/%m/%Y at %I:%M%p").replace(tzinfo=tz).isoformat()
         except ValueError:
             print(f"Unknown TASS date format: {tass_date}")
             return None
