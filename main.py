@@ -22,12 +22,25 @@ import warnings
 import traceback
 import tempfile
 import subprocess
+
+from email import message_from_bytes
+from email.message import EmailMessage
+from email.policy import SMTP
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
+from email.generator import BytesGenerator
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
 from notion_client import APIResponseError, Client, collect_paginated_api
+from io import BytesIO
+from dataclasses import dataclass
+from typing import Any, Optional, cast
 
 try:
     from systemd import journal
@@ -375,6 +388,11 @@ def weekly_summary():
     notify(assignments, exams, [], "weekly")
 
 def load_assignments():
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+
     TASS_USER = os.getenv("TASS_USER")
     TASS_PASS = os.getenv("TASS_PASS")
     if not TASS_USER or not TASS_PASS:
@@ -382,7 +400,7 @@ def load_assignments():
         return
     # Scrapes assignments from Student Cafe and adds them to the remote db
     try:
-        driver = webdriver.Chrome()
+        driver = webdriver.Chrome(options=options)
         driver.get("https://alpha.tas.qld.edu.au/studentcafe/login.cfm")
         logger.debug("Navigated to login page")
         email_input = WebDriverWait(driver, 10).until(
@@ -434,6 +452,8 @@ fetch("https://alpha.tas.qld.edu.au/studentcafe/remote-json.cfm?do=studentportal
         logger.error("Error while loading assignments from Student Cafe")
         logger.debug(e)
         return
+    finally:
+        refresh_database()
 
 def update_remote(assignments_list):
     logger.debug("Run update remote")
@@ -446,6 +466,12 @@ def update_remote(assignments_list):
 def upsert_assignment(assignment):
     logger.debug(f"Upserting assignment {assignment.object_name} with Activity Assign ID {assignment.activity_assign_id}")
     data_source_id = resolve_data_source_id()
+    def map_status(status):
+        if status.lower() == "not completed":
+            return "Not Submitted (Final)"
+        if status.lower() == "completed":
+            return "Submitted (Final)"
+        return status
     # Step 1: Search for existing page with Activity Assign ID
     query = cast(
         dict[str, Any],
@@ -466,9 +492,10 @@ def upsert_assignment(assignment):
         "Draft Date": {"date": {"start": tass_to_iso(assignment.dt_draft)} if assignment.dt_draft else None},
         "Due Date": {"date": {"start": tass_to_iso(assignment.dt_publish_finish)} if assignment.dt_publish_finish else None},
         "Task Type": {"select": {"name": "Exam" if "exam" in assignment.object_name.lower() or "folio" in assignment.object_name.lower() else "Practical" if "practical" in assignment.object_name.lower() else "Assignment"}},
-        "Status": {"status": {"name": assignment.student_status_desc}},
+        "Status": {"status": {"name": map_status(assignment.student_status_desc)}},
         "Results Release": {"date": {"start": tass_to_iso(assignment.dt_publish_finish_display)} if assignment.dt_publish_finish_display else None},
         # TODO: If I want to get results per activity im going to have to scrape https://alpha.tas.qld.edu.au/studentcafe/remote-html.cfm?do=studentportal.activities.main.lmsActivities.detail which has assign id in the payload. Could also help with activity types idk 
+        # TODO: Subjects w/ the relation fields (ugh)
     }
 
     # Step 2: Update or create
@@ -745,6 +772,7 @@ else:
     schedule.every().hour.do(refresh_database)
     schedule.every().day.at("06:00", "Australia/Brisbane").do(reminders)
     schedule.every().week.do(weekly_summary)
+    schedule.every().day.at("05:00", "Australia/Brisbane").do(load_assignments)
 
 while True:
     schedule.run_pending()
