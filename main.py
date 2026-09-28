@@ -1,3 +1,5 @@
+print("=== MAIN.PY STARTED ===", flush=True)
+
 import os
 import sys
 import smtplib
@@ -34,6 +36,7 @@ from email.generator import BytesGenerator
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
@@ -142,13 +145,13 @@ fmt = colorlog.ColoredFormatter(
         }
     }
 )
-try:
-    journal_handler = journal.JournalHandler()
-    journal_handler.setLevel(logging.DEBUG)
-except NameError:
-    logger.warning("systemd.journal module not found, journal logging disabled")
-else:
-    logger.addHandler(journal_handler)
+#try:
+#    journal_handler = journal.JournalHandler()
+#    journal_handler.setLevel(logging.DEBUG)
+#except NameError:
+#    logger.warning("systemd.journal module not found, journal logging disabled")
+#else:
+#    logger.addHandler(journal_handler)
 
 stdout = colorlog.StreamHandler(stream=sys.stdout)
 stdout.setFormatter(fmt)
@@ -389,9 +392,14 @@ def weekly_summary():
 
 def load_assignments():
     options = Options()
+
+    options.binary_location = "/usr/bin/chromium-browser"
+
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+
+    service = Service("/usr/bin/chromedriver")
 
     TASS_USER = os.getenv("TASS_USER")
     TASS_PASS = os.getenv("TASS_PASS")
@@ -400,7 +408,7 @@ def load_assignments():
         return
     # Scrapes assignments from Student Cafe and adds them to the remote db
     try:
-        driver = webdriver.Chrome(options=options)
+        driver = webdriver.Chrome(options=options, service=service)
         driver.get("https://alpha.tas.qld.edu.au/studentcafe/login.cfm")
         logger.debug("Navigated to login page")
         email_input = WebDriverWait(driver, 10).until(
