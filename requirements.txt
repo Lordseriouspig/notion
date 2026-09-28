@@ -16,3 +16,4 @@ schedule==1.2.2
 urllib3==2.4.0
 selenium==4.14.0
 notion_client==3.0.0
+python-json-logger==4.2.0

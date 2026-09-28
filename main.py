@@ -13,7 +13,7 @@ import smtplib
 #from typing import Any, Optional, cast
 from zoneinfo import ZoneInfo
 import logging
-import colorlog
+from pythonjsonlogger import json as jsonlogger
 import argparse
 import schedule
 import time
@@ -116,32 +116,8 @@ global db
 # Creating Logger
 logger = logging.getLogger("Main")
 
-fmt = colorlog.ColoredFormatter(
-    "%(light_blue)s  %(asctime)s | %(log_color)s%(levelname)s%(reset)s %(arrow_log_color)s>>>%(reset)s %(message_log_color)s%(message)s",
-    reset=True,
-    datefmt="%Y-%m-%dT%H:%M:%SZ",
-    log_colors={
-        'DEBUG': 'light_black,thin',
-        'INFO': 'white',
-        'WARNING': 'yellow,bold',
-        'ERROR': 'red,bold',
-        'CRITICAL': 'red,bg_light_white,bold',
-    },
-    secondary_log_colors={
-        'message': {
-            'DEBUG': 'white',
-            'WARNING': 'yellow',
-            'ERROR': 'red',
-            'CRITICAL': 'red,bold'
-        },
-        'arrow': {
-            'DEBUG': 'white',
-            'INFO': 'white',
-            'WARNING': 'yellow',
-            'ERROR': 'red',
-            'CRITICAL': 'red'
-        }
-    }
+fmt = jsonlogger.JsonFormatter(
+    '%(asctime)s %(levelname)s %(name)s %(message)s'
 )
 #try:
 #    journal_handler = journal.JournalHandler()
@@ -165,7 +141,7 @@ smimeParam = args.smime
 logger.setLevel(logging.DEBUG)
 logger.propagate = False
 
-stdout = colorlog.StreamHandler(sys.stdout)
+stdout = logging.StreamHandler(sys.stdout)
 stdout.setLevel(logging.DEBUG if debugParam else logging.INFO)
 stdout.setFormatter(fmt)
 
