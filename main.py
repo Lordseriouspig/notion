@@ -1,5 +1,3 @@
-print("=== MAIN.PY STARTED ===", flush=True)
-
 import os
 import sys
 import smtplib
@@ -771,6 +769,7 @@ if devParam:
         logger.info("Sending weekly summary complete")
     sys.exit(0)
 else:
+    logger.info("Notion has started")
     refresh_database()
     schedule.every().hour.do(refresh_database)
     schedule.every().day.at("06:00", "Australia/Brisbane").do(reminders)
