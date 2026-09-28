@@ -3,16 +3,16 @@ print("=== MAIN.PY STARTED ===", flush=True)
 import os
 import sys
 import smtplib
-from email import message_from_bytes
-from email.message import EmailMessage
-from email.policy import SMTP
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.application import MIMEApplication
-from email.generator import BytesGenerator
-from io import BytesIO
-from dataclasses import dataclass
-from typing import Any, Optional, cast
+#from email import message_from_bytes
+#from email.message import EmailMessage
+#from email.policy import SMTP
+#from email.mime.multipart import MIMEMultipart
+#from email.mime.text import MIMEText
+#from email.mime.application import MIMEApplication
+#from email.generator import BytesGenerator
+#from io import BytesIO
+#from dataclasses import dataclass
+#from typing import Any, Optional, cast
 from zoneinfo import ZoneInfo
 import logging
 import colorlog
@@ -21,13 +21,13 @@ import schedule
 import time
 import json
 import warnings
-import traceback
+#import traceback
 import tempfile
 import subprocess
 
 from email import message_from_bytes
 from email.message import EmailMessage
-from email.policy import SMTP
+#from email.policy import SMTP
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
@@ -153,30 +153,25 @@ fmt = colorlog.ColoredFormatter(
 #else:
 #    logger.addHandler(journal_handler)
 
-stdout = colorlog.StreamHandler(stream=sys.stdout)
-stdout.setFormatter(fmt)
-
-logger.addHandler(stdout)
-logger.setLevel(logging.DEBUG)
-
 # Debug Params
 parser = argparse.ArgumentParser(description='Manages Notion and notifications')
 parser.add_argument('--debug', action='store_true', help='Enable debug logging')
-parser.add_argument('--no-smime', action='store_true', help='Disable S/MIME')
+parser.add_argument('--no-smime', action='store_true', help='[Deprecated] Disable S/MIME (S/MIME is now off by default, this does nothing)')
+parser.add_argument("--smime", action='store_true', help='Enable S/MIME')
 parser.add_argument('--development', action='store_true', help='Runs scripts immediatly instead of scheduling them')
-debugParam = parser.parse_args().debug
-devParam = parser.parse_args().development
-global smimeParam
-smimeParam = parser.parse_args().no_smime
+args = parser.parse_args()
+debugParam = args.debug
+devParam = args.development
+smimeParam = args.smime
 
-if debugParam:
-    stdout.setLevel(logging.DEBUG)
-    logger.info('Executing with debug mode')
-else:
-    stdout.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
+logger.propagate = False
 
-if devParam:
-    logger.info('Executing with development mode')
+stdout = colorlog.StreamHandler(sys.stdout)
+stdout.setLevel(logging.DEBUG if debugParam else logging.INFO)
+stdout.setFormatter(fmt)
+
+logger.addHandler(stdout)
 
 # Catch unhandled exceptions
 def handle_unhandled_exception(exc_type, exc_value, exc_traceback):
@@ -205,7 +200,7 @@ if not INTEGRATION_SECRET:
 notion = Client(
     auth=INTEGRATION_SECRET,
     logger=logger,
-    log_level=logging.DEBUG if debugParam else logging.WARNING,
+    log_level=logging.DEBUG if debugParam else logging.INFO,
     notion_version="2025-09-03",
 )
 db_id = os.getenv("DB_ID")
@@ -666,7 +661,7 @@ def sign_content(msg, cert_path, key_path):
         os.remove(signed_path)
 
 def email(html,terminology):
-    if not smimeParam:
+    if smimeParam:
         run_smime = True
     else:
         run_smime = False
